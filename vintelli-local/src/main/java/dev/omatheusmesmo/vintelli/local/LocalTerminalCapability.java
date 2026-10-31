@@ -17,13 +17,13 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 
 /**
- * Local terminal of the terminal capability. The parsed command reaches the
- * child process as separate argv entries, never as one string through a
- * shell: there is no {@code shell=true} anywhere in Vintelli, so an
- * unsanitised line cannot chain, glob or inject. Commands that control the
- * machine or erase data recursively come back as
- * {@code REQUIRES_CONFIRMATION} and only run when the caller reissues the
- * request carrying an explicit confirmation.
+ * Local terminal of the terminal capability. The command line is handed to a
+ * real shell ({@code /bin/sh -c} on POSIX, {@code cmd.exe /c} on Windows),
+ * so pipes, redirects, globbing, variable expansion and {@code cd} are
+ * interpreted by that shell. The working directory stays confined to the
+ * project root. Commands that control the machine or erase data recursively
+ * come back as {@code REQUIRES_CONFIRMATION} and only run when the caller
+ * reissues the request carrying an explicit confirmation.
  *
  * <p>Working directory policy: every command runs inside the
  * {@link LocalProjectRoot}, with no opt-out. A relative working directory
@@ -31,11 +31,9 @@ import jakarta.inject.Singleton;
  * {@code ..} or behind a symlink, fails before a process starts. A command that
  * times out returns the output it produced so far in the failure detail.
  *
- * <p>Known limits, deliberately kept for the interactive terminal to replace:
- * the line is not a shell, so pipes, redirects, globbing, variable expansion,
- * command chaining and {@code cd} are not interpreted; each word is passed as
- * one argument. The confirmation gate is a heuristic on the program name and
- * is documented on {@link DangerousCommands}.
+ * <p>The confirmation gate is a heuristic on the program name and is
+ * documented on {@link DangerousCommands}: it inspects the first token of the
+ * parsed line and does not follow wrappers or indirections.
  */
 @Unremovable
 @Singleton
@@ -77,27 +75,28 @@ public final class LocalTerminalCapability implements TerminalCapability {
 
     @Override
     public CapabilityResult<TerminalResult> execute(TerminalRequest request) {
-        List<String> command;
+        List<String> parsed;
         try {
-            command = TerminalCommandParser.parse(request.commandLine());
+            parsed = TerminalCommandParser.parse(request.commandLine());
         } catch (IllegalArgumentException e) {
             return CapabilityResult.failed(new CapabilityFailure("The command line cannot be parsed into a program",
                     e.getMessage()));
         }
-        List<String> args = command.subList(1, command.size());
-        if (!request.confirmed() && DangerousCommands.requiresConfirmation(command.get(0), args)) {
+        List<String> args = parsed.subList(1, parsed.size());
+        if (!request.confirmed() && DangerousCommands.requiresConfirmation(parsed.get(0), args)) {
             return CapabilityResult.ok(new TerminalResult(TerminalOutcome.REQUIRES_CONFIRMATION, -1, ""));
         }
-        return run(command, request);
+        return run(request);
     }
 
-    private CapabilityResult<TerminalResult> run(List<String> command, TerminalRequest request) {
+    private CapabilityResult<TerminalResult> run(TerminalRequest request) {
         Path inside = projectRoot.confine(request.workingDirectory());
         if (inside == null) {
             return CapabilityResult.failed(new CapabilityFailure(
                     "The working directory is outside the project root or cannot be resolved",
                     request.workingDirectory().toString()));
         }
+        List<String> command = shellCommand(request.commandLine());
         ProcessRunner.ProcessResult result;
         try {
             result = runner.run(new ProcessRunner.CommandPlan(command, inside, Map.of(), defaultTimeout));
@@ -110,5 +109,13 @@ public final class LocalTerminalCapability implements TerminalCapability {
             case TIMED_OUT -> CapabilityResult.failed(new CapabilityFailure(
                     "The command timed out", result.output()));
         };
+    }
+
+    private static List<String> shellCommand(String commandLine) {
+        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        if (os.contains("win")) {
+            return List.of("cmd.exe", "/d", "/c", commandLine);
+        }
+        return List.of("/bin/sh", "-c", commandLine);
     }
 }

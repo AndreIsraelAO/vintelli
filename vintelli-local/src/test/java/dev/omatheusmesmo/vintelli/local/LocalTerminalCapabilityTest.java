@@ -111,11 +111,15 @@ class LocalTerminalCapabilityTest {
     }
 
     @Test
-    void reportsASpawnThatCannotHappenAsAFailedResult() {
+    void reportsAMissingExecutableAsANonZeroExitInsteadOfASpawnFailure() {
+        assumeFalse(TestProcesses.isWindows(), "Shell error wording differs on Windows");
+
         var result = capability().execute(new TerminalRequest("vintelli-no-such-executable", temp, true));
 
-        assertTrue(result.isFailure());
-        assertTrue(result.failureOf().orElseThrow().reason().contains("Cannot start"));
+        assertFalse(result.isFailure());
+        TerminalResult terminalResult = ((CapabilityResult.Ok<TerminalResult>) result).value();
+        assertEquals(TerminalOutcome.EXECUTED, terminalResult.outcome());
+        assertEquals(127, terminalResult.exitCode());
     }
 
     @Test
