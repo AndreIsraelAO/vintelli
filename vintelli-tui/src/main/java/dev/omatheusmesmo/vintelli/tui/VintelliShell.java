@@ -21,6 +21,7 @@ import dev.omatheusmesmo.vintelli.tui.search.ProjectSearchModel;
 import dev.omatheusmesmo.vintelli.tui.search.ProjectSearchOverlay;
 import dev.omatheusmesmo.vintelli.api.search.ProjectSearch;
 import dev.omatheusmesmo.vintelli.api.capability.NavigationCapability;
+import dev.omatheusmesmo.vintelli.api.capability.VersionControlCapability;
 import dev.omatheusmesmo.vintelli.api.capability.CapabilityResult;
 import dev.omatheusmesmo.vintelli.api.capability.EditorBridge.OpenRequest;
 import dev.tamboui.layout.Constraint;
@@ -147,6 +148,7 @@ public final class VintelliShell implements GlobalEventHandler, ShellHighlightPo
     private final BuiltinEditor editor;
     private final ProjectSearch projectSearch;
     private final List<NavigationCapability> navigationProviders;
+    private final List<VersionControlCapability> vcsProviders;
     private final ShellLayout shellLayout;
     private final ShellLayoutStore layoutStore;
     private volatile DockElement layoutDock;
@@ -179,8 +181,10 @@ public final class VintelliShell implements GlobalEventHandler, ShellHighlightPo
     @Inject
     public VintelliShell(ToolWindowRegistry registry, ShellState state, KeymapRegistry keymapRegistry,
             Instance<ShellThemes> themes, ProjectSearch projectSearch,
-            @All List<NavigationCapability> navigationProviders) {
-        this(registry.toolWindows(), state, keymapRegistry::get, themes.get(), projectSearch, navigationProviders, true);
+            @All List<NavigationCapability> navigationProviders,
+            @All List<VersionControlCapability> vcsProviders) {
+        this(registry.toolWindows(), state, keymapRegistry::get, themes.get(), projectSearch, navigationProviders,
+                vcsProviders, true);
     }
 
     /**
@@ -190,7 +194,7 @@ public final class VintelliShell implements GlobalEventHandler, ShellHighlightPo
      * profile drives it.
      */
     public VintelliShell(List<ToolWindow> toolWindows, ShellState state, ShellThemes themes) {
-        this(toolWindows, state, () -> Keymap.defaultKeymap(toolWindows), themes, null, List.of(), false);
+        this(toolWindows, state, () -> Keymap.defaultKeymap(toolWindows), themes, null, List.of(), List.of(), false);
     }
 
     /**
@@ -198,7 +202,7 @@ public final class VintelliShell implements GlobalEventHandler, ShellHighlightPo
      * named profile or a user keymap source.
      */
     public VintelliShell(List<ToolWindow> toolWindows, ShellState state, Keymap keymap, ShellThemes themes) {
-        this(toolWindows, state, () -> keymap, themes, null, List.of(), false);
+        this(toolWindows, state, () -> keymap, themes, null, List.of(), List.of(), false);
     }
 
     /**
@@ -207,26 +211,33 @@ public final class VintelliShell implements GlobalEventHandler, ShellHighlightPo
      */
     public VintelliShell(List<ToolWindow> toolWindows, ShellState state, Supplier<Keymap> keymapSupplier,
             ShellThemes themes) {
-        this(toolWindows, state, keymapSupplier, themes, null, List.of(), false);
+        this(toolWindows, state, keymapSupplier, themes, null, List.of(), List.of(), false);
     }
 
     public VintelliShell(List<ToolWindow> toolWindows, ShellState state, Supplier<Keymap> keymapSupplier,
             ShellThemes themes, ProjectSearch projectSearch) {
-        this(toolWindows, state, keymapSupplier, themes, projectSearch, List.of(), false);
+        this(toolWindows, state, keymapSupplier, themes, projectSearch, List.of(), List.of(), false);
     }
 
     public VintelliShell(List<ToolWindow> toolWindows, ShellState state, Supplier<Keymap> keymapSupplier,
             ShellThemes themes, ProjectSearch projectSearch, List<NavigationCapability> navigationProviders) {
-        this(toolWindows, state, keymapSupplier, themes, projectSearch, navigationProviders, false);
+        this(toolWindows, state, keymapSupplier, themes, projectSearch, navigationProviders, List.of(), false);
+    }
+
+    public VintelliShell(List<ToolWindow> toolWindows, ShellState state, Supplier<Keymap> keymapSupplier,
+            ShellThemes themes, ProjectSearch projectSearch, List<NavigationCapability> navigationProviders,
+            List<VersionControlCapability> vcsProviders) {
+        this(toolWindows, state, keymapSupplier, themes, projectSearch, navigationProviders, vcsProviders, false);
     }
 
     private VintelliShell(List<ToolWindow> toolWindows, ShellState state, Supplier<Keymap> keymapSupplier,
             ShellThemes themes, ProjectSearch projectSearch, List<NavigationCapability> navigationProviders,
-            boolean persistLayout) {
+            List<VersionControlCapability> vcsProviders, boolean persistLayout) {
         this.themes = themes;
         this.state = state;
         this.projectSearch = projectSearch;
         this.navigationProviders = List.copyOf(navigationProviders);
+        this.vcsProviders = List.copyOf(vcsProviders);
         this.editor = toolWindows.stream().filter(BuiltinEditor.class::isInstance)
                 .map(BuiltinEditor.class::cast).findFirst().orElse(null);
         this.toolWindows = toolWindows.stream().filter(window -> !(window instanceof BuiltinEditor)).toList();
@@ -834,6 +845,18 @@ public final class VintelliShell implements GlobalEventHandler, ShellHighlightPo
                 closeOverlays(parts);
                 nextProblem();
             }
+            case KeyActions.VCS_REFRESH -> {
+                closeOverlays(parts);
+                refreshVcs();
+            }
+            case KeyActions.VCS_SHOW_DIFF -> {
+                closeOverlays(parts);
+                showVcsDiff();
+            }
+            case KeyActions.VCS_DIFF_WORKING_TREE -> {
+                closeOverlays(parts);
+                showVcsWorkingTreeDiff();
+            }
             case KeyActions.PROJECT_WIDER -> {
                 closeOverlays(parts);
                 resizeProject(2);
@@ -1144,12 +1167,84 @@ public final class VintelliShell implements GlobalEventHandler, ShellHighlightPo
         for (ToolWindow window : toolWindows) {
             entries.addAll(window.menuEntries());
         }
+        String vcsUnavailable = availableVcsProvider() == null
+                ? vcsProviders.isEmpty() ? "Version control provider unavailable"
+                        : vcsProviders.stream().map(provider -> provider.health().reason())
+                                .filter(Objects::nonNull).findFirst().orElse("Version control provider unavailable")
+                : "";
+        addMenu(entries, "VCS", KeyActions.VCS_REFRESH, "Refresh", vcsUnavailable);
+        addMenu(entries, "VCS", KeyActions.VCS_SHOW_DIFF, "Show Diff", canEdit ? vcsUnavailable : editorUnavailable);
+        addMenu(entries, "VCS", KeyActions.VCS_DIFF_WORKING_TREE, "Diff Working Tree", vcsUnavailable);
         return List.copyOf(entries);
     }
 
     private NavigationCapability availableNavigationProvider() {
         return navigationProviders.stream().filter(candidate -> candidate.health().isAvailable())
                 .findFirst().orElse(null);
+    }
+
+    private VersionControlCapability availableVcsProvider() {
+        return vcsProviders.stream().filter(candidate -> candidate.health().isAvailable())
+                .findFirst().orElse(null);
+    }
+
+    public void refreshVcs() {
+        VersionControlCapability provider = availableVcsProvider();
+        if (provider == null) {
+            status = vcsProviders.isEmpty() ? "Version control unavailable"
+                    : "Version control unavailable: "
+                            + vcsProviders.stream().map(p -> p.health().reason()).filter(Objects::nonNull)
+                                    .findFirst().orElse("no healthy provider");
+            return;
+        }
+        CapabilityResult<VersionControlCapability.Status> result = provider.status();
+        if (result instanceof CapabilityResult.Failed<VersionControlCapability.Status> failed) {
+            status = "VCS refresh failed: " + failed.failure().reason();
+            return;
+        }
+        VersionControlCapability.Status statusValue =
+                ((CapabilityResult.Ok<VersionControlCapability.Status>) result).value();
+        String branch = statusValue.isDetached() ? "detached HEAD" : statusValue.branch();
+        status = "VCS: " + branch + " (+" + (statusValue.ahead() == null ? 0 : statusValue.ahead())
+                + "/-" + (statusValue.behind() == null ? 0 : statusValue.behind()) + "), "
+                + statusValue.entries().size() + " changed";
+    }
+
+    public void showVcsDiff() {
+        VersionControlCapability provider = availableVcsProvider();
+        if (provider == null) {
+            status = "Version control unavailable";
+            return;
+        }
+        if (editor == null || editor.activeDocument().isEmpty()) {
+            status = "Open a project file first";
+            return;
+        }
+        Path file = Path.of(editor.activeDocument().get().file());
+        CapabilityResult<String> result = provider.diff(file);
+        if (result instanceof CapabilityResult.Failed<String> failed) {
+            status = "VCS diff failed: " + failed.failure().reason();
+            return;
+        }
+        String text = ((CapabilityResult.Ok<String>) result).value();
+        this.show(new ShellUnifiedDiff(file.toString(), text == null ? "" : text));
+        status = "VCS diff: " + file;
+    }
+
+    public void showVcsWorkingTreeDiff() {
+        VersionControlCapability provider = availableVcsProvider();
+        if (provider == null) {
+            status = "Version control unavailable";
+            return;
+        }
+        CapabilityResult<String> result = provider.diffWorkingTree();
+        if (result instanceof CapabilityResult.Failed<String> failed) {
+            status = "VCS diff failed: " + failed.failure().reason();
+            return;
+        }
+        String text = ((CapabilityResult.Ok<String>) result).value();
+        this.show(new ShellUnifiedDiff("working tree", text == null ? "" : text));
+        status = "VCS diff: working tree";
     }
 
     private static void addMenu(List<MenuEntry> entries, String menu, String action, String label, String reason) {

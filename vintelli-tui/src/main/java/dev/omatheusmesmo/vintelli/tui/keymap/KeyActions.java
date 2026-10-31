@@ -41,6 +41,9 @@ public final class KeyActions {
     public static final String BOTTOM_TALLER = "layout_bottom_taller";
     public static final String BOTTOM_SHORTER = "layout_bottom_shorter";
         public static final String TOGGLE_TOOL_WINDOW = "ToggleToolWindow";
+    public static final String VCS_REFRESH = "vcs_refresh";
+    public static final String VCS_SHOW_DIFF = "vcs_showDiff";
+    public static final String VCS_DIFF_WORKING_TREE = "vcs_diffWorkingTree";
 
     public static List<KeyAction> shellActions() {
         return List.of(new KeyAction(MENU, "Open Menu", ""),
